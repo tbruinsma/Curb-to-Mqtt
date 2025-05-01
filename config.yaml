@@ -9,3 +9,7 @@ MQTT_TOPIC: "home/curb/power" # You can change the topic to what ever you like i
 MQTT_USERNAME: "YOUR-MQTT-USERNAME"  # Leave empty if no username is needed #
 MQTT_PASSWORD: "YOUR-MQTT-PASSWORD"  # Leave empty if no password is needed #
 DEBUG: false # Set to true to enable output and debug messages #
+HACONFIG: true #set to enable output of home assistant auto discover
+PERSIST_TOKEN: false; # Persist the token to a file to avoid 429 errors while debugging (Recomended for debugging only) #
+PERSIST_LAST_TOKEN: ""
+PERSIST_LAST_REFRESH: "1900-01-01 00:00"

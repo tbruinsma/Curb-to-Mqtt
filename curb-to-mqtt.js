@@ -10,7 +10,8 @@ const config = yaml.load(fs.readFileSync('config.yaml', 'utf8'));
 // Extracting values from the config object
 const { 
     TOKEN_URL, CLIENT_ID, CLIENT_SECRET, USERNAME, PASSWORD, AUDIENCE, 
-    MQTT_BROKER_URL, MQTT_TOPIC, MQTT_USERNAME, MQTT_PASSWORD, DEBUG 
+    MQTT_BROKER_URL, MQTT_TOPIC, MQTT_USERNAME, MQTT_PASSWORD, DEBUG, 
+    HACONFIG, PERSIST_TOKEN, PERSIST_LAST_TOKEN, PERSIST_LAST_REFRESH
 } = config;
 
 // Debug logging function
@@ -20,9 +21,56 @@ function debugLog(...args) {
     }
 }
 
+function dateAdd(interval, units, date=null) {
+    //if no date is past, seed it as current date/time
+    if(!date)
+        date = new Date();
+    const newDate = new Date(date);
+    switch (interval.toLowerCase()) {
+        case 'day':
+            newDate.setDate(date.getDate() + units);
+            break;
+        case 'week':
+        newDate.setDate(date.getDate() + 7 * units);
+            break;
+        case 'month':
+            newDate.setMonth(date.getMonth() + units);
+            break;
+        case 'year':
+            newDate.setFullYear(date.getFullYear() + units);
+            break;
+        case 'hour':
+            newDate.setHours(date.getHours() + units);
+            break;
+        case 'minute':
+            newDate.setMinutes(date.getMinutes() + units);
+            break;
+        case 'second':
+            newDate.setSeconds(date.getSeconds() + units);
+            break;
+        default:
+        throw new Error('Invalid interval: ' + interval);
+    }
+    return newDate;
+}
 // Function to fetch a new access token
-async function fetchUserAccessToken() {
+async function fetchUserAccessToken(force=false) {
     try {
+        if(!force && PERSIST_TOKEN){
+            let lastRefresh = new Date();
+            if(!PERSIST_LAST_REFRESH)
+                lastRefresh = new Date(PERSIST_LAST_REFRESH);
+            let lastToken = PERSIST_LAST_TOKEN;
+            if(lastToken.length==0 || lastRefresh < dateAdd('hour', -5)){
+                force=true;
+            }
+            else{
+                return lastToken;
+            }
+        }else{
+            force=true;
+        }
+        if(force){
         const response = await axios.post(TOKEN_URL, {
             grant_type: 'password',
             audience: AUDIENCE,
@@ -34,10 +82,39 @@ async function fetchUserAccessToken() {
             headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' }
         });
 
+            if(PERSIST_TOKEN){
+                let doc = yaml.safeLoad(fs.readFileSync('./config.yaml', 'utf8'));
+                doc.PERSIST_LAST_TOKEN = response.data.access_token;
+                doc.PERSIST_LAST_REFRESH = (new Date()).now;
+                fs.writeFile('./config.yaml', yaml.safeDump(doc), (err) => {
+                    if (err) {
+                        console.log(err);
+                    }
+                });
+            }
+        }
         debugLog('Access token fetched successfully.');
         return response.data.access_token;
     } catch (error) {
         console.error('Error fetching access token:', error.message);
+        throw error;
+    }
+}
+async function fetchLatest(locationId, accessToken) {
+    try {
+         debugLog('fetch latest readings:', locationId);
+		const response = await axios.get(`https://app.energycurb.com/api/latest/${locationId}`, {
+            headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' }
+        });
+        if (response.data && response.data.circuits.length > 0) {
+            debugLog('Latest readings circuit count:', response.data.circuits.length);
+            return response.data;
+        } else {
+            console.error('No readings found.');
+            throw new Error('No readings found');
+        }
+    } catch (error) {
+        console.error('Error fetching Location Config:', error.message);
         throw error;
     }
 }
@@ -88,6 +165,30 @@ async function connectToLiveData() {
             debugLog('Connected to Curb WebSocket.');
             socket.emit('authenticate', { token: USER_ACCESS_TOKEN });
         });
+		if(HACONFIG){
+			debugLog('Publish HA Config to MQTT.');
+			const latest = await fetchLatest(LOCATION_ID, USER_ACCESS_TOKEN);
+            latest.circuits.forEach(circuit => {
+					const payload = {
+						device: {
+                            ids: [
+                                'curb_energy'
+                            ], 
+                            mdl: 'Curb Energy',
+                            mf: 'Curb Energy',
+                            name: 'Curb Energy Monitor'
+                        } ,
+						device_class: 'power',
+						name: circuit.label,
+						state_class: 'measurement',
+						state_topic: `${MQTT_TOPIC}/${circuit.id}`,
+						uniq_id: `${circuit.circuit_type}_${circuit.id}`,
+						unit_of_measurement: 'W'
+					};
+					const topic = `homeassistant/sensor/${circuit.id}/config`;
+					mqttClient.publish(topic, JSON.stringify(payload));
+				});
+		}
 
         socket.on('authorized', () => {
             debugLog('WebSocket authentication successful.');
