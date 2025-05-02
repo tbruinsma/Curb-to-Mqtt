@@ -25,7 +25,9 @@ function dateAdd(interval, units, date=null) {
     //if no date is past, seed it as current date/time
     if(!date)
         date = new Date();
+
     const newDate = new Date(date);
+
     switch (interval.toLowerCase()) {
         case 'day':
             newDate.setDate(date.getDate() + units);
@@ -53,15 +55,21 @@ function dateAdd(interval, units, date=null) {
     }
     return newDate;
 }
+
 // Function to fetch a new access token
 async function fetchUserAccessToken(force=false) {
     try {
+
         if(!force && PERSIST_TOKEN){
             let lastRefresh = new Date();
+
             if(!PERSIST_LAST_REFRESH)
                 lastRefresh = new Date(PERSIST_LAST_REFRESH);
+
             let lastToken = PERSIST_LAST_TOKEN;
+
             if(lastToken.length==0 || lastRefresh < dateAdd('hour', -5)){
+                //force a refresh
                 force=true;
             }
             else{
@@ -70,17 +78,18 @@ async function fetchUserAccessToken(force=false) {
         }else{
             force=true;
         }
+
         if(force){
-        const response = await axios.post(TOKEN_URL, {
-            grant_type: 'password',
-            audience: AUDIENCE,
-            username: USERNAME,
-            password: PASSWORD,
-            client_id: CLIENT_ID,
-            client_secret: CLIENT_SECRET
-        }, {
-            headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' }
-        });
+            const response = await axios.post(TOKEN_URL, {
+                grant_type: 'password',
+                audience: AUDIENCE,
+                username: USERNAME,
+                password: PASSWORD,
+                client_id: CLIENT_ID,
+                client_secret: CLIENT_SECRET
+            }, {
+                headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-cache' }
+            });
 
             if(PERSIST_TOKEN){
                 let doc = yaml.safeLoad(fs.readFileSync('./config.yaml', 'utf8'));
@@ -93,6 +102,8 @@ async function fetchUserAccessToken(force=false) {
                 });
             }
         }
+        
+
         debugLog('Access token fetched successfully.');
         return response.data.access_token;
     } catch (error) {
@@ -100,12 +111,17 @@ async function fetchUserAccessToken(force=false) {
         throw error;
     }
 }
+
+
+
+// Function to fetch the latest readings
 async function fetchLatest(locationId, accessToken) {
     try {
          debugLog('fetch latest readings:', locationId);
 		const response = await axios.get(`https://app.energycurb.com/api/latest/${locationId}`, {
             headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' }
         });
+
         if (response.data && response.data.circuits.length > 0) {
             debugLog('Latest readings circuit count:', response.data.circuits.length);
             return response.data;
@@ -139,6 +155,7 @@ async function fetchLocationId(accessToken) {
     }
 }
 
+
 // Function to connect to Curb WebSocket and MQTT
 async function connectToLiveData() {
     try {
@@ -165,9 +182,12 @@ async function connectToLiveData() {
             debugLog('Connected to Curb WebSocket.');
             socket.emit('authenticate', { token: USER_ACCESS_TOKEN });
         });
+		
+		//Publish Home Assistant auto discovery
 		if(HACONFIG){
 			debugLog('Publish HA Config to MQTT.');
 			const latest = await fetchLatest(LOCATION_ID, USER_ACCESS_TOKEN);
+			
             latest.circuits.forEach(circuit => {
 					const payload = {
 						device: {
@@ -176,19 +196,21 @@ async function connectToLiveData() {
                             ], 
                             mdl: 'Curb Energy',
                             mf: 'Curb Energy',
-                            name: 'Curb Energy Monitor'
+                            name: 'Curb Energy'
                         } ,
 						device_class: 'power',
 						name: circuit.label,
 						state_class: 'measurement',
-						state_topic: `${MQTT_TOPIC}/${circuit.id}`,
+						state_topic: `${MQTT_TOPIC}/${circuit.id}/state`,
 						uniq_id: `${circuit.circuit_type}_${circuit.id}`,
 						unit_of_measurement: 'W'
 					};
 					const topic = `homeassistant/sensor/${circuit.id}/config`;
 					mqttClient.publish(topic, JSON.stringify(payload));
+					//debugLog('[MQTT]', topic, payload);
 				});
 		}
+
 
         socket.on('authorized', () => {
             debugLog('WebSocket authentication successful.');
@@ -207,22 +229,28 @@ async function connectToLiveData() {
         socket.on('data', (data) => {
             debugLog('Received data from WebSocket.');
             data.circuits.forEach(circuit => {
-                const payload = {
-                    id: circuit.id,
-                    label: circuit.label,
-                    power: circuit.w,
-                    type: circuit.circuit_type
-                };
-                const topic = `${MQTT_TOPIC}/${circuit.id}`;
-                mqttClient.publish(topic, JSON.stringify(payload));
-                debugLog('Published to MQTT:', topic, payload);
+                // const payload = {
+                //     id: circuit.id,
+                //     label: circuit.label,
+                //     power: circuit.w,
+                //     type: circuit.circuit_type
+                // };
+                const topic = `${MQTT_TOPIC}/${circuit.id}/state`;
+                //mqttClient.publish(topic, JSON.stringify(payload));
+                mqttClient.publish(topic, circuit.w.toString(), (err) => {
+                    if (err) {
+                      console.error('Error publishing message:', err);
+                    } else {
+                      console.log('Message published successfully');
+                    }});
+                //debugLog('Published to MQTT:', topic, payload);
             });
         });
-
+        
         // Periodically refresh token every 12 hours
         setInterval(async () => {
             try {
-                const newToken = await fetchUserAccessToken();
+                const newToken = await fetchUserAccessToken(true);
                 if (newToken !== USER_ACCESS_TOKEN) {
                     USER_ACCESS_TOKEN = newToken;
                     socket.emit('authenticate', { token: USER_ACCESS_TOKEN });
@@ -232,12 +260,11 @@ async function connectToLiveData() {
                 console.error('Error refreshing token:', error.message);
             }
         }, 43200000); // 12 hours
+        
     } catch (error) {
         console.error('Error during setup:', error.message);
     }
 }
 
 
-// Start the connection process
 connectToLiveData();
-
